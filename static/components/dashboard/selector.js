@@ -4,20 +4,12 @@ customElements.define(
         constructor() {
             super();
             this.last_sites = null;
-            
             document.addEventListener("selector-daterange-fetched", (evt) => {
                 this.handleDateRangeFetched(evt.detail);
             });
-            
-            // Handle browser back/forward
-            window.addEventListener("popstate", (evt) => {
-                if (evt.state && evt.state.site) {
-                    const select = document.getElementById("site-select");
-                    if (select) {
-                        select.value = evt.state.site;
-                        this.onSiteSelChanged(false); // Skip pushState for popstate navigation
-                    }
-                }
+            // Back/forward already changed the URL. Restore the site without pushState.
+            window.addEventListener("popstate", () => {
+                this.onPopState();
             });
         }
 
@@ -26,7 +18,7 @@ customElements.define(
             // all other components
             this.dump = dump;
 
-            let sites = Object.entries(dump.sites)
+            var sites = Object.entries(dump.sites)
                 .sort((a, b) => b[1].count - a[1].count)
                 .map((i) => i[0]);
 
@@ -41,9 +33,10 @@ customElements.define(
                 sites = ["counter.dev"];
             }
 
-            // Use meta.project if available (from URL parameter), otherwise use prefs.site
-            let sitePref = dump.meta.project || dump.user.prefs.site;
-            const rangePref = dump.user.prefs.range;
+            // ?project= wins when it names a site we actually have. Demo mode
+            // narrows `sites` above, so a project param cannot select a hidden site.
+            var sitePref = this.chooseSite(sites);
+            var rangePref = dump.user.prefs.range;
 
             this.style.display = "flex";
 
@@ -69,6 +62,7 @@ customElements.define(
 
             document.getElementById("site-select").onchange = (evt) => this.onSiteSelChanged(evt);
             document.getElementById("range-select").onchange = (evt) => this.onRangeSelChanged(evt);
+            this.settleProjectUrl(sitePref, sites);
         }
 
         updateFavicon() {
@@ -76,7 +70,12 @@ customElements.define(
             favicon.src = `https://icons.duckduckgo.com/ip3/${this.site}.ico`;
         }
 
-        onSiteSelChanged(updateHistory = true) {
+        // `false` is the popstate path and must not push another history entry.
+        // The dropdown passes the change event, which is not `false`.
+        onSiteSelChanged(updateHistory) {
+            if (!this.dump || !this.site) {
+                return;
+            }
             this.updateFavicon();
 
             // request change up in the cloud and then also apply that change down
@@ -84,11 +83,10 @@ customElements.define(
             fetch("/setPrefSite?" + encodeURIComponent(this.site));
             this.dump.user.prefs.site = this.site;
 
-            // Update URL with project parameter (skip for popstate navigation)
-            if (updateHistory) {
-                const newUrl = new URL(window.location);
-                newUrl.searchParams.set("project", this.site);
-                window.history.pushState({site: this.site}, "", newUrl);
+            if (updateHistory !== false) {
+                var url = new URL(window.location.href);
+                url.searchParams.set("project", this.site);
+                window.history.pushState({site: this.site}, "", url);
             }
 
             document.dispatchEvent(
@@ -96,6 +94,56 @@ customElements.define(
                     detail: this.dump,
                 }),
             );
+        }
+
+        chooseSite(sites) {
+            var project = new URLSearchParams(window.location.search).get("project");
+            if (project && sites.includes(project)) {
+                return project;
+            }
+            var stateSite = window.history.state && window.history.state.site;
+            if (stateSite && sites.includes(stateSite)) {
+                return stateSite;
+            }
+            if (sites.includes(this.dump.user.prefs.site)) {
+                return this.dump.user.prefs.site;
+            }
+            return sites[0];
+        }
+
+        // Seed history.state so the first Back target still knows which site
+        // was visible, and drop a ?project= that is not in `sites`.
+        settleProjectUrl(site, sites) {
+            if (!site) {
+                return;
+            }
+            var url = new URL(window.location.href);
+            var project = url.searchParams.get("project");
+            var invalid = project !== null && !sites.includes(project);
+            if (invalid) {
+                url.searchParams.delete("project");
+            }
+            var state = window.history.state;
+            if (invalid || !state || state.site !== site) {
+                window.history.replaceState({site: site}, "", url);
+            }
+        }
+
+        onPopState() {
+            if (!this.dump) {
+                return;
+            }
+            var select = document.getElementById("site-select");
+            if (!select || !select.options.length) {
+                return;
+            }
+            var sites = Array.from(select.options).map((opt) => opt.value);
+            var site = this.chooseSite(sites);
+            this.settleProjectUrl(site, sites);
+            if (select.value !== site) {
+                select.value = site;
+                this.onSiteSelChanged(false);
+            }
         }
 
         onRangeSelChanged(evt) {
